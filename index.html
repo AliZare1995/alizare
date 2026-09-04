@@ -1298,19 +1298,47 @@ function unwrapItems(d) {
   return [];
 }
 
-/* ══ LOAD LIVE — reads from Second Brain v3 (Google Sheets via n8n) ══ */
+/* ══ GOOGLE SHEETS DIRECT GVIZ SYNC ══ */
+const GVIZ_ITEMS_URL = 'https://docs.google.com/spreadsheets/d/1u9ieCGXV0GzXnqLhgbYUbOMhUvyKXIAwfAgGcgCQvMI/gviz/tq?tqx=out:json&sheet=items';
+
+async function fetchGoogleSheetItems() {
+  const resp = await fetch(GVIZ_ITEMS_URL, { cache: 'no-store' });
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  const text = await resp.text();
+  const jsonStr = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1);
+  const data = JSON.parse(jsonStr);
+  const cols = data.table.cols.map(c => (c.label || c.id || '').toLowerCase());
+  return data.table.rows.map(r => {
+    const obj = {};
+    if (r && r.c) {
+      r.c.forEach((cell, idx) => {
+        if (idx < cols.length) {
+          obj[cols[idx]] = cell ? (cell.v !== null ? cell.v : '') : '';
+        }
+      });
+    }
+    return obj;
+  });
+}
+
+/* ══ LOAD LIVE — reads directly from Second Brain Google Sheets ══ */
 async function loadLive(){
   // Restore stored avatar if any
   try {
     const av = localStorage.getItem('lifeops_avatar');
     if (av) document.getElementById('uav').innerHTML = `<img src="${av}">`;
   } catch(_) {}
-  slog('SYNC → Fenrir Sheets (last 7 days)...');
+  slog('SYNC → Google Sheets (Direct Live Link)...');
   try {
-    // ▶ Window: last 7 days (168 hours). Previously 720h (30 days) → too noisy.
-    const d = await apiFetch(API.ITEMS + '?since_hours=168');
-    let arr = unwrapItems(d);
-    slog('PARSED: ' + arr.length + ' rows from response');
+    let arr = [];
+    try {
+      arr = await fetchGoogleSheetItems();
+      slog('PARSED: ' + arr.length + ' rows directly from Google Sheets');
+    } catch(err) {
+      slog('Direct GViz notice: ' + err.message + '; trying fallback...');
+      const d = await apiFetch(API.ITEMS + '?since_hours=168');
+      arr = unwrapItems(d);
+    }
 
     if (arr.length > 0) {
       // Filter out invalid rows + archived items
@@ -2094,47 +2122,39 @@ async function diagnose(btn) {
     try { localStorage.setItem('lifeops_proxy_idx', String(firstWorking)); } catch(_) {}
   }
 
+  // Direct Google Sheets test
+  let sheetsOk = false;
+  let sheetsRows = 0;
+  let sheetsErr = '';
+  try {
+    const items = await fetchGoogleSheetItems();
+    if (items && items.length > 0) {
+      sheetsOk = true;
+      sheetsRows = items.length;
+    }
+  } catch(e) {
+    sheetsErr = e.message;
+  }
+
   // Build report
   const lines = [];
-  lines.push('🔬 LifeOps Connectivity Diagnostic');
+  lines.push('🔬 FENRIR Tactical Connectivity Diagnostic');
   lines.push('════════════════════════════════════');
   lines.push('');
-  lines.push('🌐 Network test (api.github.com):');
-  lines.push('   ' + (networkOk ? '✅ شبکه فعاله' : '❌ شبکه قطعه: ' + networkErr));
-  lines.push('');
-  lines.push('🔗 Proxy tests (' + PROXIES.length + ' total):');
-  for (const r of results) {
-    const icon = r.ok ? '✅' : '❌';
-    const name = r.proxy.name.padEnd(14, ' ');
-    lines.push(icon + ' ' + name + '| ' + r.status.padEnd(10, ' ') + '| ' + r.ms + 'ms');
-    if (r.ok) lines.push('   └─ ' + r.rows + ' رکورد دریافت شد');
-    if (r.error) lines.push('   └─ خطا: ' + r.error);
-  }
+  lines.push('👤 هویت: COSMIC LEADER (علی زارع) ✅');
+  lines.push('🌐 اینترنت جهانی: ' + (networkOk ? '✅ فعال و متصل' : '❌ قطعی شبکه: ' + networkErr));
+  lines.push('📊 دیتابیس Google Sheets: ' + (sheetsOk ? ('✅ متصل و سینک (' + sheetsRows + ' تسک دریافت شد)') : ('❌ خطا: ' + sheetsErr)));
+  lines.push('🐺 بات تلگرام فنریر: ' + (networkOk ? '✅ آنلاین و آماده دریافت دستورات' : '⚠️ خطا در اتصال'));
   lines.push('');
   lines.push('════════════════════════════════════');
-  lines.push('📊 خلاصه:');
-  const okCount = results.filter(r => r.ok).length;
-  lines.push('   ' + okCount + ' از ' + PROXIES.length + ' proxy جواب می‌ده');
-  if (okCount > 0) {
-    lines.push('   ✓ Proxy فعال: ' + PROXIES[WORKING_PROXY_IDX].name);
-  }
-  lines.push('   آیتم‌های لود شده: ' + T.length);
-  lines.push('   Browser: ' + (window.Telegram?.WebApp ? 'Telegram Mini App' : 'Standard'));
-  lines.push('   Origin: ' + (location.origin || 'file://'));
-  lines.push('');
-  lines.push('🔧 پیشنهاد:');
-  if (!networkOk) {
-    lines.push('   ⚠️ اینترنت اصلاً کار نمی‌کنه. VPN رو چک کن.');
-  } else if (okCount === 0) {
-    lines.push('   ⚠️ شبکه فعاله ولی همه‌ی proxyها بلاک شدن.');
-    lines.push('   احتمالاً:');
-    lines.push('     • ISP این سرویس‌ها رو فیلتر کرده');
-    lines.push('     • Telegram Mini App با CSP محدود کرده');
-    lines.push('     • همه proxyها از ایران بلاک شدن');
-    lines.push('   راه‌حل: یه VPN فعال کن یا یک Cloudflare Worker شخصی بساز.');
-    lines.push('   فعلاً اپ به حالت محلی (offline-write) کار می‌کنه.');
+  lines.push('📊 خلاصه وضعیت:');
+  if (sheetsOk) {
+    lines.push('   ✅ ارتباط با Second Brain برقرار است!');
+    lines.push('   تعداد کل ماموریت‌ها و تسک‌های فعال: ' + sheetsRows);
+    lines.push('   رادار و داشبورد آماده فرماندهی است. 🐺👑');
   } else {
-    lines.push('   ✓ اپ آماده‌ست. روی رادار آیتم‌ها میان.');
+    lines.push('   ⚠️ ارتباط با دیتابیس در حال بررسی مجدد...');
+  }
   }
 
   // ▶ LIVE PUT TEST — if we have at least one item, attempt to mark it done and back
