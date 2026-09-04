@@ -874,11 +874,12 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg0);color:var
       <div class="frow">
         <div class="fp on" onclick="flt('all',this)">ALL</div>
         <div class="fp" onclick="flt('task',this)">TASK</div>
+        <div class="fp" onclick="flt('note',this)">NOTE</div>
         <div class="fp" onclick="flt('reminder',this)">REMINDER</div>
         <div class="fp" onclick="flt('idea',this)">IDEA</div>
         <div class="fp" onclick="flt('finance',this)">FINANCE</div>
         <div class="fp" onclick="flt('health',this)">HEALTH</div>
-        <div class="fp" onclick="flt('event',this)">EVENT</div>
+        <div class="fp" onclick="flt('research',this)">RESEARCH</div>
       </div>
       <div id="mlist"></div>
     </div>
@@ -1338,6 +1339,55 @@ function unwrapItems(d) {
 /* ══ GOOGLE SHEETS DIRECT GVIZ SYNC ══ */
 const GVIZ_ITEMS_URL = 'https://docs.google.com/spreadsheets/d/1u9ieCGXV0GzXnqLhgbYUbOMhUvyKXIAwfAgGcgCQvMI/gviz/tq?tqx=out:json&sheet=items';
 
+function normalizeSheetRow(it) {
+  if (!it) return it;
+  // Auto-heal shifted rows (where created_at has Persian text and priority has date)
+  if (it.created_at && !/\d{4}/.test(String(it.created_at))) {
+    let realDate = '';
+    for (const f of [it.priority, it.attachment_text, it.attachment_url, it.updated_at]) {
+      if (f && typeof f === 'string' && /\d{4}-\d{2}/.test(f)) {
+        realDate = f;
+        break;
+      }
+    }
+    if (realDate) {
+      const realContent = it.created_at;
+      const realType = (it.content && it.content.length < 25) ? it.content : 'note';
+      it.content = realContent;
+      it.created_at = realDate;
+      it.item_type = realType;
+      it.priority = it.author || 'normal';
+    }
+  }
+  return it;
+}
+
+function getItemTimestamp(it) {
+  if (!it) return 0;
+  if (it.created_at) {
+    const t = new Date(it.created_at).getTime();
+    if (!isNaN(t) && t > 1000000000000) return t;
+  }
+  if (it.updated_at) {
+    const t = new Date(it.updated_at).getTime();
+    if (!isNaN(t) && t > 1000000000000) return t;
+  }
+  if (it.id) {
+    const m = String(it.id).match(/^(\d{13})/);
+    if (m) {
+      const t = parseInt(m[1], 10);
+      if (!isNaN(t) && t > 1000000000000) return t;
+    }
+  }
+  for (const f of [it.priority, it.attachment_text, it.attachment_url]) {
+    if (f && typeof f === 'string' && f.includes('2026-')) {
+      const t = new Date(f).getTime();
+      if (!isNaN(t) && t > 1000000000000) return t;
+    }
+  }
+  return 0;
+}
+
 async function fetchGoogleSheetItems() {
   const resp = await fetch(GVIZ_ITEMS_URL, { cache: 'no-store' });
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -1354,7 +1404,7 @@ async function fetchGoogleSheetItems() {
         }
       });
     }
-    return obj;
+    return normalizeSheetRow(obj);
   });
 }
 
@@ -1402,8 +1452,8 @@ async function loadLive(){
         return;
       }
 
-      // Sort by created_at descending — newest first
-      arr.sort((a, b) => new Date(b.created_at||0) - new Date(a.created_at||0));
+      // Sort by timestamp descending — newest first (immune to NaN dates)
+      arr.sort((a, b) => getItemTimestamp(b) - getItemTimestamp(a));
 
       // Load any local state overrides (cached done/archived states)
       const localState = loadLocalState();
@@ -1414,6 +1464,7 @@ async function loadLive(){
         const override = localState[idStr];
         // `done` is derived from server tag 'done' OR a local 'done' override
         const isDone = tags.includes('done') || override === 'done';
+        const ts = getItemTimestamp(it) || Date.now();
         return {
           id:              it.id || String(Date.now() + Math.random()),
           text:            it.content || '',
@@ -1421,7 +1472,7 @@ async function loadLive(){
           priority:        it.priority || 'normal',
           done:            isDone,
           tags:            isDone && !tags.includes('done') ? [...tags, 'done'] : tags,
-          ts:              new Date(it.created_at || Date.now()).getTime(),
+          ts:              ts,
           external_id:     it.external_id || String(it.id || ''),
           source:          it.source || 'sheet',
           attachment_url:  it.attachment_url  || '',
@@ -1429,6 +1480,7 @@ async function loadLive(){
           _localOverride:  override || null,
         };
       });
+
 
       // Filter out items that the user archived locally (PUT may have failed but
       // we respect the user's intent on this device)
